@@ -1,0 +1,65 @@
+---
+- name: Update GitHub Commit Status using GitHub App
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # These variables will be populated from the credential attached to the job template
+    # or from Event-Driven Ansible's event data.
+    # For demonstration, hardcoding (NOT recommended for production):
+    # github_app_id: "YOUR_GITHUB_APP_ID"
+    # github_app_private_key_content: |
+    #   -----BEGIN RSA PRIVATE KEY-----
+    #   MIIEvQ... (your private key content) ...
+    #   -----END RSA PRIVATE KEY-----
+    # github_app_installation_id: "YOUR_GITHUB_INSTALLATION_ID"
+
+    # These variables are coming from the webhook payload (e.g., from Event-Driven Ansible)
+    # Assuming your EDA rulebook passes these as extra vars to the job template
+    repo_owner: "{{ github_webhook_payload.repository.owner.login }}"
+    repo_name: "{{ github_webhook_payload.repository.name }}"
+    commit_sha: "{{ github_webhook_payload.after | default(github_webhook_payload.pull_request.head.sha) }}" # For push or pull_request events
+    status_state: "pending" # or "success", "failure", "error"
+    status_context: "Ansible Automation Platform Build"
+    status_description: "Ansible playbook is running..."
+    status_target_url: "https://{{ ansible_tower_host }}/#/jobs/playbook/{{ awx_job_id }}" # Link back to AAP job
+
+  tasks:
+    - name: Obtain GitHub App short-lived access token
+      # This lookup requires the community.general collection
+      # We retrieve the values from the `github_app_creds` credential.
+      # The lookup plugin will take `app_id`, `private_key` (file path or content), and `installation_id`.
+      # We'll pass the content directly from the credential.
+      ansible.builtin.set_fact:
+        github_token: >-
+          {{ lookup('community.general.github_app_access_token',
+             app_id=github_app_app_id,
+             private_key=github_app_private_key | string, # Ensure it's passed as a string
+             installation_id=github_app_installation_id
+          ) }}
+      no_log: true # Prevent token from appearing in logs!
+
+    - name: Update GitHub commit status
+      community.general.github_commit_status:
+        token: "{{ github_token }}"
+        owner: "{{ repo_owner }}"
+        repo: "{{ repo_name }}"
+        sha: "{{ commit_sha }}"
+        state: "{{ status_state }}"
+        context: "{{ status_context }}"
+        description: "{{ status_description }}"
+        target_url: "{{ status_target_url }}"
+      delegate_to: localhost # Run this task on the AAP control node/execution environment
+
+    - name: Add a comment to the pull request (example for PRs)
+      # Only if this is a pull_request event and we have the PR number
+      when: github_webhook_payload.pull_request is defined and github_webhook_payload.pull_request.number is defined
+      community.general.github_issue:
+        token: "{{ github_token }}"
+        owner: "{{ repo_owner }}"
+        repo: "{{ repo_name }}"
+        issue: "{{ github_webhook_payload.pull_request.number }}"
+        state: comment # To add a comment
+        comment: "Ansible Automation Platform job #{{ awx_job_id }} started for this pull request."
+      delegate_to: localhost
