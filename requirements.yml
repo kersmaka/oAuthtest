@@ -1,0 +1,3 @@
+# collections/requirements.yml (or wherever your EE build expects it)
+collections:
+  - community.general
